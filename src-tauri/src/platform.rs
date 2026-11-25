@@ -91,12 +91,11 @@ pub fn position_on_cursor_monitor(window: &WebviewWindow, logical_w: u32, logica
     );
 }
 
-/// 强制将窗口固定在所有普通窗口最外层（HWND_TOPMOST）并赋予键盘输入焦点
+/// 强制将窗口固定在所有普通窗口最外层（HWND_TOPMOST）并赋予内部 WebView2 键盘输入焦点
 pub fn show_topmost_and_force_focus(window: &WebviewWindow) {
     let _ = window.show();
     let _ = window.unminimize();
     let _ = window.set_always_on_top(true);
-    let _ = window.set_focus();
 
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
@@ -145,16 +144,20 @@ pub fn show_topmost_and_force_focus(window: &WebviewWindow) {
             }
         }
     }
+
+    // 关键顺序：必须在外层 HWND 成为系统前台窗口之后，再调用 Tauri set_focus()
+    // 将键盘焦点下发给内部 WebView2 控件，否则外层容器会吞掉首次按键（如 Esc）
+    let _ = window.set_focus();
 }
 
-/// 仅固定窗口到最外层（不改变移动位置）
+/// 仅修改窗口置顶层级（绝不附带 SWP_SHOWWINDOW，避免在后台静默启动时误把隐藏窗口画上屏幕）
 pub fn promote_window_topmost(window: &WebviewWindow) {
     let _ = window.set_always_on_top(true);
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
         use windows_sys::Win32::Foundation::HWND;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         };
         let target_hwnd = hwnd.0 as HWND;
         unsafe {
@@ -165,10 +168,11 @@ pub fn promote_window_topmost(window: &WebviewWindow) {
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
     }
+    let _ = window.set_focus();
 }
 
 /// 取消窗口最外层置顶，立即将其压到其他窗口后面（HWND_BOTTOM），并将输入焦点归还给先前的外部窗口

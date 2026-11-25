@@ -439,6 +439,12 @@ async function bootstrap(): Promise<void> {
   editor.focus();
   reportFrontendLog("info", `Frontend UI bootstrapped in ${(performance.now() - t0).toFixed(1)}ms`);
 
+  window.addEventListener("focus", () => {
+    editor.focus();
+  });
+
+  await invoke("notify_frontend_ready");
+
   await listen<WindowActivatedPayload>("app:window-activated", (ev) => {
     hasLastArchived = ev.payload.hasLastArchived;
     isRecallingLast = ev.payload.isRecallingLast;

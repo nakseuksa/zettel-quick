@@ -232,6 +232,20 @@ fn log_frontend_event(level: String, scope: String, message: String) {
     logger::write_log(lvl, target, &message);
 }
 
+/// 前端 DOM 与键盘事件挂载完毕后回调：若当前窗口已处于显示态（如首次引导后立即弹出），补发一次内部焦点绑定
+#[tauri::command]
+fn notify_frontend_ready(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        if win.is_visible().unwrap_or(false) {
+            log_debug!(
+                "WINDOW",
+                "Frontend ready while window is visible -> reinforcing WebView2 focus"
+            );
+            platform::show_topmost_and_force_focus(&win);
+        }
+    }
+}
+
 /// 唤起编辑弹窗：强制恢复固定在所有窗口最外层（HWND_TOPMOST），若原本处于隐藏态则定位到当前鼠标所在屏幕
 pub fn summon_window(app: &AppHandle, state: &Arc<AppState>) {
     let Some(win) = app.get_webview_window("main") else {
@@ -520,7 +534,8 @@ fn start_config_hot_reload_watcher(app: AppHandle, state: Arc<AppState>) {
 
 fn configure_main_window(win: &WebviewWindow, _cfg: &AppConfig) {
     platform::apply_window_chrome(win);
-    platform::promote_window_topmost(win);
+    // 初始化阶段窗口尚处于隐藏态（visible: false），仅标记置顶属性，绝不触发显示或抢焦点
+    let _ = win.set_always_on_top(true);
 }
 
 pub fn run() {
@@ -612,6 +627,7 @@ pub fn run() {
             toggle_pin,
             hide_capture_window,
             log_frontend_event,
+            notify_frontend_ready,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {
