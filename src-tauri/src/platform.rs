@@ -298,11 +298,31 @@ pub fn set_autostart_enabled(_enabled: bool) -> Result<bool, String> {
     Ok(false)
 }
 
-/// 若用户此前已开启开机自启，并将便携 .exe 移动到了新目录，启动时自动修复注册表中的路径
+/// 若用户此前已开启开机自启，并将原便携 .exe 移动/重命名到了新目录（原路径已不存在），启动时自动修复注册表路径
 #[cfg(windows)]
 pub fn heal_autostart_path_if_enabled() {
-    if is_autostart_enabled() {
-        let _ = set_autostart_enabled(true);
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(run_key) = hkcu.open_subkey(RUN_REG_KEY) else {
+        return;
+    };
+    let Ok(raw_cmd) = run_key.get_value::<String, _>(RUN_VALUE_NAME) else {
+        return;
+    };
+
+    // 提取已注册命令中的可执行文件路径：仅当旧路径已不存在时才自动迁移更新，避免临时或开发目录副本覆盖正式安装路径
+    let extracted_exe = if let Some(rest) = raw_cmd.trim().strip_prefix('"') {
+        rest.split_once('"').map(|(exe, _)| exe)
+    } else {
+        raw_cmd.trim().split_whitespace().next()
+    };
+
+    if let Some(old_exe) = extracted_exe {
+        if !Path::new(old_exe).exists() {
+            let _ = set_autostart_enabled(true);
+        }
     }
 }
 
