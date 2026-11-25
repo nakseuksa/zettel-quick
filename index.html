@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZettelQuick</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="card-shell">
+      <div id="drag-region" class="top-grip" data-tauri-drag-region title="按住拖拽窗口">
+        <span class="grip-pill" data-tauri-drag-region></span>
+      </div>
+
+      <div class="editor-container">
+        <textarea
+          id="editor"
+          spellcheck="false"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          placeholder="记录一个原子闪念...（输入 [[ 关联卡片，# 添加标签，Esc 保存归档）"
+        ></textarea>
+        <div id="autocomplete-popup" class="ac-popup hidden" role="listbox"></div>
+      </div>
+
+      <footer class="status-bar" data-tauri-drag-region>
+        <div class="status-left">
+          <button
+            id="target-btn"
+            type="button"
+            class="status-chip clickable"
+            title="点击或按 Ctrl+Tab 切换落盘目录"
+          >
+            <span class="chip-dot"></span>
+            <span id="target-label">Inbox</span>
+          </button>
+          <button
+            id="pin-btn"
+            type="button"
+            class="status-chip icon-chip clickable"
+            title="切换窗口置顶 (Ctrl+Shift+P)"
+          >
+            📌
+          </button>
+          <span id="mode-badge" class="mode-badge hidden">修订上一张</span>
+        </div>
+
+        <div class="status-right">
+          <span id="status-hint" class="status-hint">Esc 归档</span>
+          <span class="status-sep">·</span>
+          <span id="char-count" class="char-count">0 字</span>
+        </div>
+      </footer>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,36 @@
+# Dependencies & Frontend build outputs
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Rust / Tauri compiled binaries & build artifacts
+src-tauri/target/
+src-tauri/gen/
+target/
+*.exe
+*.dll
+*.pdb
+*.lib
+*.exp
+*.rlib
+*.d
+*.msi
+*.nsis
+*.zip
+*.7z
+
+# Runtime & user-local config / logs / WebView2 cache
+config.toml
+draft.json
+*.log
+EBWebView/
+*.WebView2/
+cards/
+vault/
+
+# IDE & OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
