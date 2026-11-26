@@ -773,4 +773,55 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn archive_and_recall_across_nested_target_subdirectories() {
+        let tmp = std::env::temp_dir().join(format!(
+            "zettel_nested_target_test_{}",
+            Local::now().timestamp_nanos_opt().unwrap_or(2)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let cfg_raw = format!(
+            r#"
+vault_dir = '{}'
+targets = [
+  {{ name = "闪念盒", path = "00. 笔记盒\00-Inbox" }},
+  {{ name = "other", path = "aaa\bbb" }},
+]
+"#,
+            tmp.to_string_lossy()
+        );
+        let cfg = crate::config::parse_config_str(&cfg_raw).unwrap();
+        let mut session = DraftSession::new(tmp.join("draft.json"));
+
+        // 1. 归档到多级中文子目录 00. 笔记盒\00-Inbox
+        let res1 = archive_session(&cfg, &mut session, "嵌套目录测试\n正文内容".to_string(), 0).unwrap();
+        let path1 = match res1 {
+            ArchiveOutcome::Saved { file_path, .. } => PathBuf::from(file_path),
+            _ => panic!("expected Saved"),
+        };
+        assert!(path1.exists());
+        assert_eq!(
+            path1.parent().unwrap(),
+            tmp.join("00. 笔记盒").join("00-Inbox")
+        );
+
+        // 2. 唤回并切换到另一多级目录 aaa\bbb，验证自动建目录并迁移旧文件
+        session.begin_recall_last().unwrap();
+        let res2 = archive_session(&cfg, &mut session, "迁移到多级目录\n正文内容".to_string(), 1).unwrap();
+        let path2 = match res2 {
+            ArchiveOutcome::Saved { file_path, updated_existing, .. } => {
+                assert!(updated_existing);
+                PathBuf::from(file_path)
+            }
+            _ => panic!("expected updated Saved"),
+        };
+        assert!(!path1.exists());
+        assert!(path2.exists());
+        assert_eq!(path2.parent().unwrap(), tmp.join("aaa").join("bbb"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

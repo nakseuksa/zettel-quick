@@ -154,8 +154,238 @@ impl Default for UiConfig {
     }
 }
 
+fn relative_subpath_segments(raw: &str) -> Vec<&str> {
+    let mut segments: Vec<&str> = Vec::new();
+    for part in raw.trim().split(['\\', '/']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            segments.pop();
+            continue;
+        }
+        segments.push(part);
+    }
+    segments
+}
+
+pub fn normalize_relative_subpath(raw: &str) -> String {
+    relative_subpath_segments(raw).join(std::path::MAIN_SEPARATOR_STR)
+}
+
+fn is_toml_bare_key_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+fn is_windows_path_key(key: &str) -> bool {
+    matches!(key, "vault_dir" | "path" | "attachments_dir")
+}
+
+/// 预处理 TOML 文本中路径字段（`vault_dir` / `path` / `attachments_dir`）的双引号字符串：
+/// 允许用户在双引号内直接书写单反斜杠 Windows 路径（如 `"00. 笔记盒\00-Inbox"`、`"aaa\bbb"`），
+/// 避免 TOML 将 `\0` 报非法转义或将 `\b`/`\n`/`\t` 静默解析为控制字符；
+/// 同时完全兼容已双写转义的 `"a\\b"`、单引号字面量 `'a\b'` 与正斜杠 `"a/b"`。
+fn preprocess_toml_windows_paths(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + 16);
+    let mut i = 0;
+    let mut expect_key = true;
+
+    while i < len {
+        let b = bytes[i];
+
+        // 1. 注释：原样保留至行尾
+        if b == b'#' {
+            let start = i;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            out.push_str(&raw[start..i]);
+            continue;
+        }
+
+        // 2. 换行：重置为可出现键名的位置
+        if b == b'\n' || b == b'\r' {
+            out.push(b as char);
+            i += 1;
+            expect_key = true;
+            continue;
+        }
+
+        // 3. 行内空白：保持当前位置语义
+        if b == b' ' || b == b'\t' {
+            out.push(b as char);
+            i += 1;
+            continue;
+        }
+
+        // 4. 内联表起始或成员分隔符：后续可能出现键名（如 `{ name = "...", path = "..." }`）
+        if b == b'{' || b == b',' {
+            out.push(b as char);
+            i += 1;
+            expect_key = true;
+            continue;
+        }
+
+        // 5. 多行基本字符串 """..."""：原样跳过
+        if i + 2 < len && &bytes[i..i + 3] == b"\"\"\"" {
+            let start = i;
+            i += 3;
+            while i < len {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    i += 2;
+                    continue;
+                }
+                if i + 2 < len && &bytes[i..i + 3] == b"\"\"\"" {
+                    i += 3;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&raw[start..i]);
+            expect_key = false;
+            continue;
+        }
+
+        // 6. 多行字面字符串 '''...'''：原样跳过
+        if i + 2 < len && &bytes[i..i + 3] == b"'''" {
+            let start = i;
+            i += 3;
+            while i < len {
+                if i + 2 < len && &bytes[i..i + 3] == b"'''" {
+                    i += 3;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&raw[start..i]);
+            expect_key = false;
+            continue;
+        }
+
+        // 7. 单行基本字符串（非路径键）：原样跳过
+        if b == b'"' {
+            let start = i;
+            i += 1;
+            while i < len && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1] != b'\n' && bytes[i + 1] != b'\r' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&raw[start..i]);
+            expect_key = false;
+            continue;
+        }
+
+        // 8. 单行字面字符串 '...'：原样跳过
+        if b == b'\'' {
+            let start = i;
+            i += 1;
+            while i < len && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&raw[start..i]);
+            expect_key = false;
+            continue;
+        }
+
+        // 9. 键名位置：识别 `vault_dir` / `path` / `attachments_dir = "..."`
+        if expect_key && is_toml_bare_key_byte(b) {
+            let key_start = i;
+            while i < len && is_toml_bare_key_byte(bytes[i]) {
+                i += 1;
+            }
+            let key = &raw[key_start..i];
+
+            if is_windows_path_key(key) {
+                let mut look = i;
+                while look < len && (bytes[look] == b' ' || bytes[look] == b'\t') {
+                    look += 1;
+                }
+                if look < len && bytes[look] == b'=' {
+                    look += 1;
+                    while look < len && (bytes[look] == b' ' || bytes[look] == b'\t') {
+                        look += 1;
+                    }
+                    let is_single_line_double_quote = look < len
+                        && bytes[look] == b'"'
+                        && !(look + 2 < len && &bytes[look..look + 3] == b"\"\"\"");
+
+                    if is_single_line_double_quote {
+                        // 原样输出 `key = "`
+                        out.push_str(&raw[key_start..=look]);
+                        let mut pos = look + 1;
+                        let mut chunk_start = pos;
+
+                        while pos < len && bytes[pos] != b'\n' && bytes[pos] != b'\r' {
+                            if bytes[pos] == b'\\' {
+                                out.push_str(&raw[chunk_start..pos]);
+                                if pos + 1 < len && bytes[pos + 1] == b'\\' {
+                                    // 保留用户已双写的 `\\`
+                                    out.push_str("\\\\");
+                                    pos += 2;
+                                } else {
+                                    // 单反斜杠（含 `\0`、`\b`、`\n`、`\t` 或尾部 `\"`）统一转义为 `\\`
+                                    out.push_str("\\\\");
+                                    pos += 1;
+                                }
+                                chunk_start = pos;
+                                continue;
+                            }
+                            if bytes[pos] == b'"' {
+                                out.push_str(&raw[chunk_start..=pos]);
+                                pos += 1;
+                                chunk_start = pos;
+                                break;
+                            }
+                            pos += 1;
+                        }
+                        if chunk_start < pos {
+                            out.push_str(&raw[chunk_start..pos]);
+                        }
+                        i = pos;
+                        expect_key = false;
+                        continue;
+                    }
+                }
+            }
+
+            out.push_str(key);
+            expect_key = false;
+            continue;
+        }
+
+        // 10. 其他字符（含完整 UTF-8 多字节字符）
+        if let Some(ch) = raw[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+        expect_key = false;
+    }
+
+    out
+}
+
 impl AppConfig {
     pub fn normalized(mut self) -> Self {
+        self.vault_dir = self.vault_dir.trim().to_string();
+        for target in &mut self.targets {
+            target.path = normalize_relative_subpath(&target.path);
+        }
+        self.attachments_dir = normalize_relative_subpath(&self.attachments_dir);
         if self.targets.is_empty() {
             self.targets.push(TargetDir {
                 name: "根目录".to_string(),
@@ -189,20 +419,19 @@ impl AppConfig {
     pub fn resolve_target_dir(&self, index: usize) -> (&TargetDir, PathBuf) {
         let safe_idx = if index < self.targets.len() { index } else { 0 };
         let target = &self.targets[safe_idx];
-        let full = if target.path.trim().is_empty() {
-            self.vault_path()
-        } else {
-            self.vault_path().join(&target.path)
-        };
+        let mut full = self.vault_path();
+        for seg in relative_subpath_segments(&target.path) {
+            full.push(seg);
+        }
         (target, full)
     }
 
     pub fn resolve_attachments_dir(&self) -> PathBuf {
-        if self.attachments_dir.trim().is_empty() {
-            self.vault_path()
-        } else {
-            self.vault_path().join(&self.attachments_dir)
+        let mut full = self.vault_path();
+        for seg in relative_subpath_segments(&self.attachments_dir) {
+            full.push(seg);
         }
+        full
     }
 }
 
@@ -252,14 +481,14 @@ pub fn render_commented_config_toml(vault_dir: &Path) -> String {
 # 知识库根目录（全库 [[双链]] 与 #标签 索引范围）
 vault_dir = '{vault_str}'
 
-# 可切换的落盘目标子目录（相对 vault_dir；设为空字符串 "" 表示直接存入根目录）
+# 可切换的落盘目标子目录（相对 vault_dir，支持多级子目录如 "00. 笔记盒\00-Inbox" 或 "aaa/bbb"；设为空字符串 "" 表示直接存入根目录）
 # 第一项为默认落盘目录，在编辑器内按 Ctrl+Tab 可循环切换
 targets = [
   {{ name = "闪念盒", path = "00-Inbox" }},
   {{ name = "永久卡", path = "10-Permanent" }},
 ]
 
-# 粘贴截图自动保存目录（相对 vault_dir）
+# 粘贴截图自动保存目录（相对 vault_dir，支持多级子目录）
 attachments_dir = "attachments"
 
 # 全库索引时自动忽略的目录名
@@ -309,7 +538,8 @@ max_files = 3
 }
 
 pub fn parse_config_str(raw: &str) -> Result<AppConfig, String> {
-    toml::from_str::<AppConfig>(raw)
+    let preprocessed = preprocess_toml_windows_paths(raw);
+    toml::from_str::<AppConfig>(&preprocessed)
         .map(AppConfig::normalized)
         .map_err(|e| format!("TOML 解析失败: {e}"))
 }
@@ -439,5 +669,134 @@ mod tests {
         assert_eq!(parsed.vault_dir, r"D:\Notes\new_vault\MyZettelkasten");
         assert_eq!(parsed.targets.len(), 2);
         assert_eq!(parsed.hotkey.toggle, "Ctrl+Alt+N");
+    }
+
+    #[test]
+    fn nested_target_subdirectories_with_windows_backslashes_in_double_quotes() {
+        let raw = r#"
+# 知识库根目录（全库 [[双链]] 与 #标签 索引范围）
+vault_dir = 'C:\Users\wangh\OneDrive\Notebook'
+
+# 可切换的落盘目标子目录（相对 vault_dir；设为空字符串 "" 表示直接存入根目录）
+# 第一项为默认落盘目录，在编辑器内按 Ctrl+Tab 可循环切换
+targets = [
+  { name = "闪念盒", path = "00. 笔记盒\00-Inbox" },
+  { name = "文献卡", path = "00. 笔记盒\10-Literature" },
+  { name = "永久卡", path = "00. 笔记盒\20-Permanent" },
+  { name = "other", path = "aaa\bbb" },
+]
+"#;
+        let cfg = parse_config_str(raw).expect("nested backslash target paths must parse cleanly");
+        assert_eq!(cfg.vault_dir, r"C:\Users\wangh\OneDrive\Notebook");
+        assert_eq!(cfg.targets.len(), 4);
+
+        let expected_rel = [
+            normalize_relative_subpath("00. 笔记盒/00-Inbox"),
+            normalize_relative_subpath("00. 笔记盒/10-Literature"),
+            normalize_relative_subpath("00. 笔记盒/20-Permanent"),
+            normalize_relative_subpath("aaa/bbb"),
+        ];
+        for (idx, exp) in expected_rel.iter().enumerate() {
+            assert_eq!(&cfg.targets[idx].path, exp);
+        }
+
+        let (_, dir0) = cfg.resolve_target_dir(0);
+        assert_eq!(
+            dir0,
+            PathBuf::from(r"C:\Users\wangh\OneDrive\Notebook")
+                .join("00. 笔记盒")
+                .join("00-Inbox")
+        );
+
+        let (_, dir3) = cfg.resolve_target_dir(3);
+        assert_eq!(
+            dir3,
+            PathBuf::from(r"C:\Users\wangh\OneDrive\Notebook")
+                .join("aaa")
+                .join("bbb")
+        );
+    }
+
+    #[test]
+    fn target_paths_handle_escapes_leading_slashes_trailing_slashes_and_variants() {
+        let raw = r#"
+vault_dir = "C:\Users\wangh\OneDrive\Notebook"
+attachments_dir = "00. 笔记盒\attachments\images\"
+
+targets = [
+  { name = "前导反斜杠", path = "\00. 笔记盒\00-Inbox" },
+  { name = "正斜杠多级", path = "/00. 笔记盒/10-Literature/" },
+  { name = "双反斜杠转义", path = "00. 笔记盒\\20-Permanent" },
+  { name = "单引号字面量", path = '00. 笔记盒\30-Index' },
+  { name = "冲突转义字母", path = "notes\new\temp\ref\foo\box\unicode\" },
+  { name = "越界防护", path = "..\..\safe\sub" },
+  { name = "根目录", path = "" },
+]
+"#;
+        let cfg = parse_config_str(raw).expect("all path style variants must parse cleanly");
+        assert_eq!(cfg.vault_dir, r"C:\Users\wangh\OneDrive\Notebook");
+        assert_eq!(
+            cfg.resolve_attachments_dir(),
+            PathBuf::from(r"C:\Users\wangh\OneDrive\Notebook")
+                .join("00. 笔记盒")
+                .join("attachments")
+                .join("images")
+        );
+
+        let root = PathBuf::from(r"C:\Users\wangh\OneDrive\Notebook");
+        assert_eq!(
+            cfg.resolve_target_dir(0).1,
+            root.join("00. 笔记盒").join("00-Inbox")
+        );
+        assert_eq!(
+            cfg.resolve_target_dir(1).1,
+            root.join("00. 笔记盒").join("10-Literature")
+        );
+        assert_eq!(
+            cfg.resolve_target_dir(2).1,
+            root.join("00. 笔记盒").join("20-Permanent")
+        );
+        assert_eq!(
+            cfg.resolve_target_dir(3).1,
+            root.join("00. 笔记盒").join("30-Index")
+        );
+        assert_eq!(
+            cfg.resolve_target_dir(4).1,
+            root.join("notes")
+                .join("new")
+                .join("temp")
+                .join("ref")
+                .join("foo")
+                .join("box")
+                .join("unicode")
+        );
+        assert_eq!(cfg.resolve_target_dir(5).1, root.join("safe").join("sub"));
+        assert_eq!(cfg.resolve_target_dir(6).1, root);
+    }
+
+    #[test]
+    fn array_of_tables_targets_and_comments_work_cleanly() {
+        let raw = r#"
+# path = "注释里的路径\00不应影响"
+vault_dir = 'D:\Vault'
+
+[[targets]]
+name = "卡片"
+path = "00. 笔记盒\00-Inbox"
+
+[[targets]]
+path = "aaa\bbb\ccc"
+name = "深层目录"
+"#;
+        let cfg = parse_config_str(raw).expect("[[targets]] syntax must parse cleanly");
+        assert_eq!(cfg.targets.len(), 2);
+        assert_eq!(
+            cfg.resolve_target_dir(0).1,
+            PathBuf::from(r"D:\Vault").join("00. 笔记盒").join("00-Inbox")
+        );
+        assert_eq!(
+            cfg.resolve_target_dir(1).1,
+            PathBuf::from(r"D:\Vault").join("aaa").join("bbb").join("ccc")
+        );
     }
 }
